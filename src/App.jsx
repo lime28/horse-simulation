@@ -52,6 +52,11 @@ const trackFrame = {
 const trackScale = 0.9
 const furlongFeet = 660
 const horseLengthFeet = 8
+const straightTrack = {
+  centerX: canvasSize.width / 2,
+  startY: 500,
+  finishY: 60,
+}
 const defaultViewport = {
   x: 0,
   y: 0,
@@ -319,6 +324,30 @@ function getTrackPoint(race, raceData, distance, lateralOffset) {
   }
 }
 
+function getStraightTrackPoint(race, raceData, distance, lateralOffset, postPosition, laneCount, keepLanes) {
+  const geometry = getCourseGeometry(race)
+  const pixelsPerFoot = geometry.halfTrackWidth / (raceData.trackWidth / 2)
+  const laneOffset = keepLanes
+    ? ((postPosition - 0.5) / laneCount) * raceData.trackWidth
+    : lateralOffset
+  const lateralFromCenter = raceData.trackWidth / 2 - laneOffset
+  const raceProgress = Math.max(0, Math.min(distance / raceData.raceDistance, 1))
+
+  return {
+    x: straightTrack.centerX - lateralFromCenter * pixelsPerFoot,
+    y: straightTrack.startY - raceProgress * (straightTrack.startY - straightTrack.finishY),
+    angle: -Math.PI / 2,
+  }
+}
+
+function getHorsePoint(race, raceData, horse, straightView, keepLanes, laneCount) {
+  const [postPosition, distance, lateralOffset] = horse
+
+  return straightView
+    ? getStraightTrackPoint(race, raceData, distance, lateralOffset, postPosition, laneCount, keepLanes)
+    : getTrackPoint(race, raceData, distance, lateralOffset)
+}
+
 function getRaceCenterlinePoint(race, raceData, distance) {
   const geometry = getCourseGeometry(race)
   const courseDistance = geometry.furlongs * furlongFeet
@@ -326,12 +355,14 @@ function getRaceCenterlinePoint(race, raceData, distance) {
   return getCenterlinePoint(geometry, startDistance + distance)
 }
 
-function getHorsesCenter(race, raceData, frame) {
+function getHorsesCenter(race, raceData, frame, straightView = false, keepLanes = false) {
   if (!raceData || !frame?.horses.length) return null
 
+  const laneCount = Math.max(...frame.horses.map(([postPosition]) => postPosition))
+
   const total = frame.horses.reduce(
-    (center, [, distance, lateralOffset]) => {
-      const horse = getTrackPoint(race, raceData, distance, lateralOffset)
+    (center, horseData) => {
+      const horse = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
       return {
         x: center.x + horse.x,
         y: center.y + horse.y,
@@ -545,6 +576,53 @@ function drawGate(ctx, point, halfTrackWidth, color, lineWidth) {
   ctx.stroke()
 }
 
+function drawStraightCourse(
+  ctx,
+  race,
+  laneCount,
+  keepLanes,
+  surfaceColor,
+  surfacePattern,
+  railColor,
+  viewportScale,
+) {
+  const geometry = getCourseGeometry(race)
+  const left = straightTrack.centerX - geometry.halfTrackWidth
+  const width = geometry.halfTrackWidth * 2
+  const top = straightTrack.finishY
+  const height = straightTrack.startY - straightTrack.finishY
+
+  ctx.fillStyle = surfaceColor
+  ctx.fillRect(left, top, width, height)
+  ctx.fillStyle = surfacePattern
+  ctx.fillRect(left, top, width, height)
+
+  ctx.strokeStyle = railColor
+  ctx.lineWidth = 1 / viewportScale
+  ctx.beginPath()
+  ctx.moveTo(left, top)
+  ctx.lineTo(left, straightTrack.startY)
+  ctx.moveTo(left + width, top)
+  ctx.lineTo(left + width, straightTrack.startY)
+  ctx.stroke()
+
+  if (keepLanes) {
+    ctx.save()
+    ctx.strokeStyle = railColor
+    ctx.globalAlpha = 0.38
+    ctx.lineWidth = 1
+    ctx.setLineDash([6, 7])
+    for (let lane = 1; lane < laneCount; lane += 1) {
+      const x = left + (lane / laneCount) * width
+      ctx.beginPath()
+      ctx.moveTo(x, top)
+      ctx.lineTo(x, straightTrack.startY)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+}
+
 function TrackDiagram({
   race,
   raceData,
@@ -552,6 +630,8 @@ function TrackDiagram({
   viewport,
   horseScale,
   selectedPost,
+  straightView,
+  keepLanes,
   manualPanEnabled,
   onPan,
   onSelectHorse,
@@ -605,38 +685,75 @@ function TrackDiagram({
     ctx.lineJoin = 'round'
     ctx.setLineDash([])
 
-    layout.chutes.forEach((chute) =>
-      drawChute(ctx, layout.main, chute, dirtColor, dirtPattern, railColor, labelColor),
-    )
-    drawOvalCourse(ctx, layout.main, dirtColor, dirtPattern, railColor)
-    if (layout.inner) drawOvalCourse(ctx, layout.inner, turfColor, turfPattern, railColor)
+    const laneCount = raceData?.frames[0]?.horses.reduce(
+      (highestPost, [postPosition]) => Math.max(highestPost, postPosition),
+      1,
+    ) ?? 1
+
+    if (straightView && raceData) {
+      const isTurf = race.course === 'inner'
+      drawStraightCourse(
+        ctx,
+        race,
+        laneCount,
+        keepLanes,
+        isTurf ? turfColor : dirtColor,
+        isTurf ? turfPattern : dirtPattern,
+        railColor,
+        viewportScale,
+      )
+
+      ctx.strokeStyle = styles.getPropertyValue('--gate').trim()
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(straightTrack.centerX - activeGeometry.halfTrackWidth, straightTrack.startY)
+      ctx.lineTo(straightTrack.centerX + activeGeometry.halfTrackWidth, straightTrack.startY)
+      ctx.stroke()
+      ctx.strokeStyle = styles.getPropertyValue('--focus').trim()
+      ctx.lineWidth = 3
+      ctx.beginPath()
+      ctx.moveTo(straightTrack.centerX - activeGeometry.halfTrackWidth, straightTrack.finishY)
+      ctx.lineTo(straightTrack.centerX + activeGeometry.halfTrackWidth, straightTrack.finishY)
+      ctx.stroke()
+    } else {
+      layout.chutes.forEach((chute) =>
+        drawChute(ctx, layout.main, chute, dirtColor, dirtPattern, railColor, labelColor),
+      )
+      drawOvalCourse(ctx, layout.main, dirtColor, dirtPattern, railColor)
+      if (layout.inner) drawOvalCourse(ctx, layout.inner, turfColor, turfPattern, railColor)
+
+      if (raceData) {
+        drawGate(
+          ctx,
+          getRaceCenterlinePoint(race, raceData, 0),
+          activeGeometry.halfTrackWidth,
+          styles.getPropertyValue('--gate').trim(),
+          2,
+        )
+        drawGate(
+          ctx,
+          getRaceCenterlinePoint(race, raceData, raceData.raceDistance),
+          activeGeometry.halfTrackWidth,
+          styles.getPropertyValue('--focus').trim(),
+          3,
+        )
+      }
+    }
 
     ctx.fillStyle = labelColor
     ctx.font = '700 12px Inter, sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText(`${layout.name} · ${race.course === 'inner' ? 'inner turf' : 'main dirt'}`, 400, 284)
-
-    if (raceData) {
-      drawGate(
-        ctx,
-        getRaceCenterlinePoint(race, raceData, 0),
-        activeGeometry.halfTrackWidth,
-        styles.getPropertyValue('--gate').trim(),
-        2,
-      )
-      drawGate(
-        ctx,
-        getRaceCenterlinePoint(race, raceData, raceData.raceDistance),
-        activeGeometry.halfTrackWidth,
-        styles.getPropertyValue('--focus').trim(),
-        3,
-      )
-    }
+    ctx.fillText(
+      `${layout.name} · ${straightView ? 'straight view' : race.course === 'inner' ? 'inner turf' : 'main dirt'}`,
+      straightView ? 490 : 400,
+      284,
+    )
 
     if (raceData && currentFrame) {
       const horseSize = getHorseSize(race, raceData, horseScale)
-      currentFrame.horses.forEach(([postPosition, distance, lateralOffset]) => {
-        const horse = getTrackPoint(race, raceData, distance, lateralOffset)
+      currentFrame.horses.forEach((horseData) => {
+        const [postPosition] = horseData
+        const horse = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
         drawHorse(
           ctx,
           horse.x,
@@ -653,7 +770,7 @@ function TrackDiagram({
       })
     }
     ctx.restore()
-  }, [currentFrame, horseScale, race, raceData, selectedPost, viewport])
+  }, [currentFrame, horseScale, keepLanes, race, raceData, selectedPost, straightView, viewport])
 
   return (
     <canvas
@@ -662,7 +779,11 @@ function TrackDiagram({
       width={canvasSize.width}
       height={canvasSize.height}
       role="img"
-      aria-label={`${trackLayouts[race.trackId].name}. ${trackLayouts[race.trackId].description}`}
+      aria-label={
+        straightView
+          ? `${trackLayouts[race.trackId].name} shown as a straight course with horses running upward.`
+          : `${trackLayouts[race.trackId].name}. ${trackLayouts[race.trackId].description}`
+      }
       onPointerDown={(event) => {
         const rect = event.currentTarget.getBoundingClientRect()
         const canvasX = (event.clientX - rect.left) * (canvasSize.width / rect.width)
@@ -714,8 +835,10 @@ function TrackDiagram({
           const sin = Math.sin(-viewport.rotation)
           const clickX = scaledX * cos - scaledY * sin + canvasSize.width / 2 - viewport.x
           const clickY = scaledX * sin + scaledY * cos + canvasSize.height / 2 - viewport.y
-          const clickedHorse = [...currentFrame.horses].reverse().find(([postPosition, distance, lateralOffset]) => {
-            const horse = getTrackPoint(race, raceData, distance, lateralOffset)
+          const laneCount = Math.max(...currentFrame.horses.map(([postPosition]) => postPosition))
+          const clickedHorse = [...currentFrame.horses].reverse().find((horseData) => {
+            const [postPosition] = horseData
+            const horse = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
             return isPointInHorse(clickX, clickY, { ...horse, postPosition }, horseSize)
           })
 
@@ -745,6 +868,8 @@ function App() {
   const [showLeaderboard, setShowLeaderboard] = useState(false)
   const [panCamera, setPanCamera] = useState(false)
   const [lockOrientation, setLockOrientation] = useState(false)
+  const [straightView, setStraightView] = useState(false)
+  const [keepLanes, setKeepLanes] = useState(false)
   const [leaderboardSort, setLeaderboardSort] = useState('distance')
   const [selectedPost, setSelectedPost] = useState(null)
   const race = useMemo(() => races[selectedRace], [selectedRace])
@@ -806,15 +931,15 @@ function App() {
   useEffect(() => {
     if (!panCamera || !raceData || !currentFrame) return
 
-    const horsesCenter = getHorsesCenter(race, raceData, currentFrame)
+    const horsesCenter = getHorsesCenter(race, raceData, currentFrame, straightView, keepLanes)
     if (!horsesCenter) return
 
     setViewport((current) => ({
       ...current,
       ...getCenteredViewportOffset(horsesCenter),
-      rotation: lockOrientation ? Math.PI - getAverageHorseAngle(race, raceData, currentFrame) : 0,
+      rotation: lockOrientation && !straightView ? Math.PI - getAverageHorseAngle(race, raceData, currentFrame) : 0,
     }))
-  }, [currentFrame, lockOrientation, panCamera, race, raceData])
+  }, [currentFrame, keepLanes, lockOrientation, panCamera, race, raceData, straightView])
 
   useEffect(() => {
     if (!isPlaying || !raceData) return undefined
@@ -1085,10 +1210,34 @@ function App() {
               <input
                 type="checkbox"
                 checked={lockOrientation}
-                disabled={!panCamera}
+                disabled={!panCamera || straightView}
                 onChange={(event) => setLockOrientation(event.target.checked)}
               />
               <span>Lock Orientation</span>
+            </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
+                checked={straightView}
+                disabled={!raceData}
+                onChange={(event) => {
+                  setStraightView(event.target.checked)
+                  if (!event.target.checked) setKeepLanes(false)
+                  setViewport((current) => ({ ...current, x: 0, y: 0, rotation: 0 }))
+                }}
+              />
+              <span>Straight Track</span>
+            </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
+                checked={keepLanes}
+                disabled={!straightView}
+                onChange={(event) => setKeepLanes(event.target.checked)}
+              />
+              <span>Stay in Lanes</span>
             </label>
           </div>
 
@@ -1209,6 +1358,8 @@ function App() {
             viewport={viewport}
             horseScale={horseScale}
             selectedPost={selectedPost}
+            straightView={straightView}
+            keepLanes={keepLanes}
             manualPanEnabled={!panCamera}
             onPan={pan}
             onSelectHorse={selectHorse}
