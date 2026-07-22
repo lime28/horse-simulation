@@ -1,0 +1,63 @@
+{
+  "races": [
+    {
+      "track_id": "FL",
+      "race_date": "2026-06-24",
+      "race_number": 5,
+      "horses": [
+        { "post_position": 1, "fair_win_prob": 0.298949 },
+        { "post_position": 2, "fair_win_prob": 0.106683 },
+        { "post_position": 3, "fair_win_prob": 0.117741 },
+        { "post_position": 4, "fair_win_prob": 0.046043 },
+        { "post_position": 5, "fair_win_prob": 0.009268 },
+        { "post_position": 6, "fair_win_prob": 0.027668 },
+        { "post_position": 7, "fair_win_prob": 0.010998 },
+        { "post_position": 8, "fair_win_prob": 0.130062 },
+        { "post_position": 9, "fair_win_prob": 0.007942 },
+        { "post_position": 10, "fair_win_prob": 0.087085 },
+        { "post_position": 11, "fair_win_prob": 0.157562 }
+      ]
+    },
+    {
+      "track_id": "IND",
+      "race_date": "2026-06-25",
+      "race_number": 5,
+      "horses": [
+        { "post_position": 1, "fair_win_prob": 0.008682 },
+        { "post_position": 2, "fair_win_prob": 0.163331 },
+        { "post_position": 3, "fair_win_prob": 0.110118 },
+        { "post_position": 4, "fair_win_prob": 0.047855 },
+        { "post_position": 5, "fair_win_prob": 0.139164 },
+        { "post_position": 6, "fair_win_prob": 0.031162 },
+        { "post_position": 7, "fair_win_prob": 0.031624 },
+        { "post_position": 8, "fair_win_prob": 0.092716 },
+        { "post_position": 9, "fair_win_prob": 0.072785 },
+        { "post_position": 10, "fair_win_prob": 0.061097 },
+        { "post_position": 11, "fair_win_prob": 0.099168 },
+        { "post_position": 12, "fair_win_prob": 0.050441 },
+        { "post_position": 13, "fair_win_prob": 0.091857 }
+      ]
+    },
+    {
+      "track_id": "MNR",
+      "race_date": "2026-06-28",
+      "race_number": 8,
+      "horses": [
+        { "post_position": 1, "fair_win_prob": 0.025964 },
+        { "post_position": 2, "fair_win_prob": 0.019818 },
+        { "post_position": 3, "fair_win_prob": 0.011366 },
+        { "post_position": 4, "fair_win_prob": 0.031976 },
+        { "post_position": 5, "fair_win_prob": 0.287544 },
+        { "post_position": 6, "fair_win_prob": 0.079847 },
+        { "post_position": 7, "fair_win_prob": 0.055482 },
+        { "post_position": 8, "fair_win_prob": 0.104044 },
+        { "post_position": 9, "fair_win_prob": 0.021568 },
+        { "post_position": 10, "fair_win_prob": 0.109034 },
+        { "post_position": 11, "fair_win_prob": 0.023611 },
+        { "post_position": 12, "fair_win_prob": 0.03617 },
+        { "post_position": 13, "fair_win_prob": 0.162545 },
+        { "post_position": 14, "fair_win_prob": 0.031029 }
+      ]
+    }
+  ]
+}
