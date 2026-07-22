@@ -1,4 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import * as THREE from 'three'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+import horseMetadata from '../../horse_metadata.json'
 import './App.css'
 
 const races = {
@@ -139,6 +144,102 @@ function formatProbability(probability) {
   if (!Number.isFinite(numericProbability)) return 'Unknown'
 
   return `${(numericProbability * 100).toFixed(1)}%`
+}
+
+function formatEventTime(time) {
+  const minutes = Math.floor(time / 60)
+  const seconds = time - minutes * 60
+  return `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`
+}
+
+function getLeader(frame) {
+  return [...frame.horses].sort((a, b) => b[1] - a[1])[0]
+}
+
+function getHorseRank(frame, postPosition) {
+  return [...frame.horses]
+    .sort((a, b) => b[1] - a[1])
+    .findIndex(([post]) => post === postPosition) + 1
+}
+
+function getRaceEvents(race, raceData, horseEntries) {
+  if (!raceData?.frames.length) {
+    return [{ time: 0, text: `${race.label} is loading.` }]
+  }
+
+  const frames = raceData.frames
+  const horseName = (postPosition) => horseEntries[postPosition]?.horseName ?? `Post ${postPosition}`
+  const events = [{ time: 0, text: `They're off in ${race.track} ${race.race}.` }]
+  const lengthsBehind = (frame) => {
+    const ordered = [...frame.horses].sort((a, b) => b[1] - a[1])
+    return Math.max(0, (ordered[0][1] - ordered[1][1]) / horseLengthFeet)
+  }
+
+  const calls = [
+    { progress: 0.25, label: 'At the quarter mark' },
+    { progress: 0.5, label: 'Halfway through' },
+    { progress: 0.75, label: 'Entering the final quarter' },
+    { progress: 0.9, label: 'In the closing stages' },
+  ]
+  calls.forEach(({ progress, label }, callIndex) => {
+    const frame = frames.find((candidate) => getLeader(candidate)[1] >= raceData.raceDistance * progress)
+    if (!frame) return
+    const leader = getLeader(frame)
+    const surgingHorse = [...frame.horses].sort((a, b) => b[3] - a[3])[0]
+    const previousFrame = [...frames].reverse().find((candidate) => candidate.time <= frame.time - 4) ?? frames[0]
+    const previousRank = getHorseRank(previousFrame, surgingHorse[0])
+    const currentRank = getHorseRank(frame, surgingHorse[0])
+    const movementText = currentRank < previousRank
+      ? `${horseName(surgingHorse[0])} moves up from position ${previousRank} to ${currentRank}.`
+      : [
+          `${horseName(surgingHorse[0])} is showing the most speed.`,
+          `${horseName(surgingHorse[0])} is gaining ground.`,
+          `${horseName(surgingHorse[0])} is making a strong run.`,
+          `${horseName(surgingHorse[0])} is finishing strongly.`,
+        ][callIndex]
+    const margin = lengthsBehind(frame)
+    events.push({
+      time: frame.time,
+      text: `${label}, ${horseName(leader[0])} leads${margin >= 0.1 ? ` by ${margin.toFixed(1)} lengths` : ''}. ${movementText}`,
+    })
+  })
+
+  const confirmationFrames = 20
+  let confirmedLeader = getLeader(frames[Math.min(confirmationFrames, frames.length - 1)])[0]
+  let lastLeadChangeTime = 0
+  for (let index = confirmationFrames; index < frames.length - confirmationFrames; index += 1) {
+    const candidate = getLeader(frames[index])[0]
+    if (candidate === confirmedLeader || frames[index].time - lastLeadChangeTime < 2) continue
+    let sustained = true
+    for (let lookAhead = 1; lookAhead <= confirmationFrames; lookAhead += 1) {
+      if (getLeader(frames[index + lookAhead])[0] !== candidate) {
+        sustained = false
+        break
+      }
+    }
+    if (!sustained) continue
+    const previousLeader = confirmedLeader
+    confirmedLeader = candidate
+    lastLeadChangeTime = frames[index].time
+    const surgingHorse = [...frames[index].horses].sort((a, b) => b[3] - a[3])[0]
+    events.push({
+      time: frames[index].time,
+      text: `${horseName(candidate)} takes the lead from ${horseName(previousLeader)}. ${surgingHorse[0] === candidate ? `${horseName(candidate)} is setting the fastest pace` : `${horseName(surgingHorse[0])} is also gaining ground`}.`,
+    })
+  }
+
+  const finishFrame = frames[frames.length - 1]
+  const finishers = [...finishFrame.horses].sort((a, b) => b[1] - a[1])
+  const fastestFinisher = [...finishFrame.horses].sort((a, b) => b[3] - a[3])[0]
+  const winningMargin = Math.max(0, (finishers[0][1] - finishers[1][1]) / horseLengthFeet)
+  events.push({
+    time: finishFrame.time,
+    text: `${horseName(finishers[0][0])} wins${winningMargin >= 0.1 ? ` by ${winningMargin.toFixed(1)} lengths` : ''}; ${horseName(finishers[1][0])} finishes second. ${horseName(fastestFinisher[0])} records the fastest closing speed.`,
+  })
+
+  return events
+    .sort((a, b) => a.time - b.time)
+    .filter((event, index, sorted) => index === 0 || event.time - sorted[index - 1].time >= 0.35)
 }
 
 function parseCsv(text) {
@@ -348,6 +449,133 @@ function getHorsePoint(race, raceData, horse, straightView, keepLanes, laneCount
     : getTrackPoint(race, raceData, distance, lateralOffset)
 }
 
+function getHorseTrajectory(race, raceData, postPosition, straightView, keepLanes) {
+  if (!raceData || postPosition === null) return []
+  const laneCount = Math.max(...raceData.frames[0].horses.map(([post]) => post))
+  return raceData.frames.flatMap((frame) => {
+    const horseData = frame.horses.find(([post]) => post === postPosition)
+    if (!horseData) return []
+    const point = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
+    return [{ ...point, speed: horseData[3] }]
+  })
+}
+
+function sampleTrajectory(trajectory, step = 6) {
+  if (trajectory.length <= 2) return trajectory
+  const sampled = trajectory.filter((_, index) => index % step === 0)
+  const last = trajectory[trajectory.length - 1]
+  if (sampled[sampled.length - 1] !== last) sampled.push(last)
+  return sampled
+}
+
+function getRaceSpeedRange(raceData) {
+  let min = Infinity
+  let max = -Infinity
+  raceData.frames.forEach((frame) => {
+    frame.horses.forEach((horse) => {
+      min = Math.min(min, horse[3])
+      max = Math.max(max, horse[3])
+    })
+  })
+  return {
+    min,
+    range: Math.max(max - min, 0.001),
+  }
+}
+
+function getSpeedColor(speed, min, range) {
+  const amount = Math.max(0, Math.min((speed - min) / range, 1))
+  return `hsl(${amount * 120} 82% 46%)`
+}
+
+function getHorseDisplayLabel(postPosition, predictions, showPredictedProbability) {
+  if (!showPredictedProbability) return String(postPosition)
+  const probability = predictions[postPosition]?.fair_win_prob
+  return Number.isFinite(probability) ? `${(probability * 100).toFixed(1)}%` : '—'
+}
+
+function createHorseModel(color, label, selected) {
+  const horse = new THREE.Group()
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.72,
+    emissive: selected ? 0xffffff : 0x000000,
+    emissiveIntensity: selected ? 0.28 : 0,
+  })
+  const darkMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.58), roughness: 0.86 })
+  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x090909, roughness: 0.35 })
+  const makeOval = (scale, position, material = bodyMaterial, rotationZ = 0) => {
+    const oval = new THREE.Mesh(new THREE.SphereGeometry(0.5, 14, 9), material)
+    oval.scale.set(...scale)
+    oval.position.set(...position)
+    oval.rotation.z = rotationZ
+    oval.castShadow = true
+    horse.add(oval)
+    return oval
+  }
+
+  makeOval([0.9, 0.58, 0.58], [0, 0.82, 0])
+  makeOval([0.58, 0.62, 0.62], [-0.32, 0.82, 0])
+  makeOval([0.5, 0.6, 0.58], [0.34, 0.87, 0])
+  makeOval([0.26, 0.78, 0.28], [0.47, 1.13, 0], bodyMaterial, -0.43)
+  makeOval([0.5, 0.36, 0.38], [0.72, 1.43, 0])
+  makeOval([0.34, 0.24, 0.3], [0.94, 1.37, 0])
+  makeOval([0.08, 0.1, 0.07], [0.83, 1.5, -0.17], eyeMaterial)
+  makeOval([0.08, 0.1, 0.07], [0.83, 1.5, 0.17], eyeMaterial)
+  makeOval([0.11, 0.3, 0.11], [0.62, 1.68, -0.1], bodyMaterial, -0.15)
+  makeOval([0.11, 0.3, 0.11], [0.62, 1.68, 0.1], bodyMaterial, -0.15)
+  for (const [x, z, baseAngle, phase] of [
+    [-0.28, -0.2, 0.08, -0.24],
+    [-0.28, 0.2, -0.08, -0.08],
+    [0.28, -0.2, -0.07, 0.08],
+    [0.28, 0.2, 0.07, 0.24],
+  ]) {
+    const legPivot = new THREE.Group()
+    legPivot.position.set(x, 0.7, z)
+    legPivot.rotation.z = baseAngle
+    legPivot.userData.horseLeg = true
+    legPivot.userData.baseAngle = baseAngle
+    legPivot.userData.phase = phase
+    const leg = makeOval([0.13, 0.76, 0.13], [0, -0.34, 0], darkMaterial)
+    const hoof = makeOval([0.2, 0.12, 0.16], [0.04, -0.69, 0], darkMaterial)
+    horse.remove(leg, hoof)
+    legPivot.add(leg, hoof)
+    horse.add(legPivot)
+  }
+  makeOval([0.16, 0.72, 0.16], [-0.65, 0.78, 0], darkMaterial, -0.72)
+
+  const labelCanvas = document.createElement('canvas')
+  labelCanvas.width = 256
+  labelCanvas.height = 128
+  const context = labelCanvas.getContext('2d')
+  context.fillStyle = color
+  context.fillRect(0, 0, labelCanvas.width, labelCanvas.height)
+  context.fillStyle = color.toLowerCase() === horsePalette[1].toLowerCase() ? '#000000' : '#ffffff'
+  context.font = '800 54px Inter, sans-serif'
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  context.fillText(label, labelCanvas.width / 2, labelCanvas.height / 2)
+  const texture = new THREE.CanvasTexture(labelCanvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  const labelSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true }))
+  labelSprite.position.set(0, 2, 0)
+  labelSprite.scale.set(0.95, 0.28, 1)
+  labelSprite.renderOrder = 3
+  horse.add(labelSprite)
+  return horse
+}
+
+function disposeThreeObject(object) {
+  object.traverse((child) => {
+    child.geometry?.dispose()
+    const materials = Array.isArray(child.material) ? child.material : child.material ? [child.material] : []
+    materials.forEach((material) => {
+      material.map?.dispose()
+      material.dispose()
+    })
+  })
+}
+
 function getRaceCenterlinePoint(race, raceData, distance) {
   const geometry = getCourseGeometry(race)
   const courseDistance = geometry.furlongs * furlongFeet
@@ -410,6 +638,92 @@ function getHorseSize(race, raceData, horseScale = 1) {
   }
 }
 
+function resolveHorseCollisions(horses, size, previousOffsets = new Map()) {
+  const targetOffsets = new Map(horses.map(({ postPosition }) => [postPosition, 0]))
+  const minimumLateralGap = size.width * 1.08
+  const minimumLongitudinalGap = size.length * 1.02
+
+  const separate = (offsets, passes = 8) => {
+    for (let pass = 0; pass < passes; pass += 1) {
+      let foundOverlap = false
+
+      for (let firstIndex = 0; firstIndex < horses.length; firstIndex += 1) {
+        for (let secondIndex = firstIndex + 1; secondIndex < horses.length; secondIndex += 1) {
+          const first = horses[firstIndex]
+          const second = horses[secondIndex]
+          const firstOffset = offsets.get(first.postPosition) ?? 0
+          const secondOffset = offsets.get(second.postPosition) ?? 0
+          const firstNormal = { x: -Math.sin(first.angle), y: Math.cos(first.angle) }
+          const secondNormal = { x: -Math.sin(second.angle), y: Math.cos(second.angle) }
+          const firstPoint = {
+            x: first.x + firstNormal.x * firstOffset,
+            y: first.y + firstNormal.y * firstOffset,
+          }
+          const secondPoint = {
+            x: second.x + secondNormal.x * secondOffset,
+            y: second.y + secondNormal.y * secondOffset,
+          }
+          const tangentX = Math.cos(first.angle) + Math.cos(second.angle)
+          const tangentY = Math.sin(first.angle) + Math.sin(second.angle)
+          const tangentLength = Math.hypot(tangentX, tangentY) || 1
+          const tangent = { x: tangentX / tangentLength, y: tangentY / tangentLength }
+          const normal = { x: -tangent.y, y: tangent.x }
+          const dx = secondPoint.x - firstPoint.x
+          const dy = secondPoint.y - firstPoint.y
+          const longitudinalDistance = Math.abs(dx * tangent.x + dy * tangent.y)
+          const lateralDistance = dx * normal.x + dy * normal.y
+
+          if (
+            longitudinalDistance < minimumLongitudinalGap &&
+            Math.abs(lateralDistance) < minimumLateralGap
+          ) {
+            foundOverlap = true
+            const previousSeparation = (previousOffsets.get(second.postPosition) ?? 0) -
+              (previousOffsets.get(first.postPosition) ?? 0)
+            const direction = Math.abs(lateralDistance) < 0.01 && previousSeparation !== 0
+              ? Math.sign(previousSeparation)
+              : lateralDistance === 0
+                ? first.postPosition < second.postPosition ? 1 : -1
+                : Math.sign(lateralDistance)
+            const correction = (minimumLateralGap - Math.abs(lateralDistance)) / 2 + 0.01
+            const firstProjection = Math.max(0.5, Math.abs(firstNormal.x * normal.x + firstNormal.y * normal.y))
+            const secondProjection = Math.max(0.5, Math.abs(secondNormal.x * normal.x + secondNormal.y * normal.y))
+            offsets.set(first.postPosition, firstOffset - direction * correction / firstProjection)
+            offsets.set(second.postPosition, secondOffset + direction * correction / secondProjection)
+          }
+        }
+      }
+
+      if (!foundOverlap) break
+    }
+  }
+
+  separate(targetOffsets)
+
+  const maximumStep = size.width * 0.18
+  const smoothedOffsets = new Map(
+    horses.map(({ postPosition }) => {
+      const previous = previousOffsets.get(postPosition) ?? 0
+      const target = targetOffsets.get(postPosition) ?? 0
+      const requestedStep = (target - previous) * 0.24
+      const limitedStep = Math.max(-maximumStep, Math.min(requestedStep, maximumStep))
+      return [postPosition, previous + limitedStep]
+    }),
+  )
+
+  return {
+    offsets: smoothedOffsets,
+    horses: horses.map((horse) => {
+      const offset = smoothedOffsets.get(horse.postPosition) ?? 0
+      return {
+        ...horse,
+        x: horse.x - Math.sin(horse.angle) * offset,
+        y: horse.y + Math.cos(horse.angle) * offset,
+      }
+    }),
+  }
+}
+
 function drawHorse(
   ctx,
   x,
@@ -418,7 +732,7 @@ function drawHorse(
   size,
   color,
   outlineColor,
-  postPosition,
+  displayLabel,
   viewportRotation,
   viewportScale,
   selected = false,
@@ -442,13 +756,19 @@ function drawHorse(
   ctx.stroke()
 
   ctx.rotate(-(angle + viewportRotation))
-  const numberSize = Math.max(4, Math.min(size.width * 0.85, size.length * 0.65))
+  let numberSize = Math.max(4, Math.min(size.width * 0.85, size.length * 0.65))
   const isWhiteHorse = color.toLowerCase() === horsePalette[1].toLowerCase()
   ctx.fillStyle = isWhiteHorse ? '#000000' : '#ffffff'
   ctx.font = `800 ${numberSize}px Inter, sans-serif`
+  const availableWidth = size.length * 0.88
+  const measuredWidth = ctx.measureText(displayLabel).width
+  if (measuredWidth > availableWidth) {
+    numberSize = Math.max(2, numberSize * (availableWidth / measuredWidth))
+    ctx.font = `800 ${numberSize}px Inter, sans-serif`
+  }
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillText(String(postPosition), 0, 0)
+  ctx.fillText(displayLabel, 0, 0)
   ctx.restore()
 }
 
@@ -623,6 +943,411 @@ function drawStraightCourse(
   }
 }
 
+function getStadiumPoints(geometry, radius) {
+  const points = []
+  const segments = 48
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = -Math.PI / 2 + (Math.PI * index) / segments
+    points.push(new THREE.Vector2(
+      geometry.rightX + radius * Math.cos(angle) - canvasSize.width / 2,
+      geometry.centerY + radius * Math.sin(angle) - canvasSize.height / 2,
+    ))
+  }
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = Math.PI / 2 + (Math.PI * index) / segments
+    points.push(new THREE.Vector2(
+      geometry.leftX + radius * Math.cos(angle) - canvasSize.width / 2,
+      geometry.centerY + radius * Math.sin(angle) - canvasSize.height / 2,
+    ))
+  }
+  return points
+}
+
+function createExtrudedCourse(geometry, color) {
+  const outer = getStadiumPoints(geometry, geometry.radius + geometry.halfTrackWidth)
+  const inner = getStadiumPoints(geometry, geometry.radius - geometry.halfTrackWidth).reverse()
+  const shape = new THREE.Shape(outer)
+  shape.holes.push(new THREE.Path(inner))
+  const mesh = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(shape, { depth: 7, bevelEnabled: false }),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0 }),
+  )
+  mesh.rotation.x = Math.PI / 2
+  mesh.position.y = 6
+  mesh.receiveShadow = true
+  mesh.castShadow = true
+  return mesh
+}
+
+function createRail(geometry, radius) {
+  const points = getStadiumPoints(geometry, radius).map(({ x, y }) => new THREE.Vector3(x, 10, y))
+  const curve = new THREE.CatmullRomCurve3(points, true, 'centripetal')
+  const rail = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 160, 1.1, 6, true),
+    new THREE.MeshStandardMaterial({ color: 0xe8edf2, roughness: 0.45 }),
+  )
+  rail.castShadow = true
+  return rail
+}
+
+function createRoundedChute(geometry, chute) {
+  const isBackstretch = chute.side === 'backstretch'
+  const joinX = isBackstretch ? geometry.rightX : geometry.leftX
+  const centerY = geometry.centerY + (isBackstretch ? -geometry.radius : geometry.radius)
+  const left = Math.min(chute.endX, joinX) - canvasSize.width / 2
+  const right = Math.max(chute.endX, joinX) - canvasSize.width / 2
+  const centerZ = centerY - canvasSize.height / 2
+  const radius = geometry.halfTrackWidth
+  const points = []
+  const segments = 20
+
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = -Math.PI / 2 + (Math.PI * index) / segments
+    points.push(new THREE.Vector2(right - radius + radius * Math.cos(angle), centerZ + radius * Math.sin(angle)))
+  }
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = Math.PI / 2 + (Math.PI * index) / segments
+    points.push(new THREE.Vector2(left + radius + radius * Math.cos(angle), centerZ + radius * Math.sin(angle)))
+  }
+
+  const mesh = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(new THREE.Shape(points), { depth: 7, bevelEnabled: false }),
+    new THREE.MeshStandardMaterial({ color: 0x9b704b, roughness: 0.95 }),
+  )
+  mesh.rotation.x = Math.PI / 2
+  mesh.position.y = 6
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  return mesh
+}
+
+function createCourseMarker(point, halfTrackWidth, finish = false) {
+  const marker = new THREE.Group()
+  const angle = Math.atan2(point.tangent[1], point.tangent[0])
+  marker.position.set(
+    point.point[0] - canvasSize.width / 2,
+    7.1,
+    point.point[1] - canvasSize.height / 2,
+  )
+  marker.rotation.y = -angle
+
+  const segments = finish ? 12 : 1
+  const segmentWidth = (halfTrackWidth * 2) / segments
+  for (let index = 0; index < segments; index += 1) {
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(finish ? 5 : 3.5, 0.8, segmentWidth),
+      new THREE.MeshStandardMaterial({ color: finish && index % 2 ? 0x121212 : 0xffffff, roughness: 0.72 }),
+    )
+    stripe.position.z = -halfTrackWidth + segmentWidth * (index + 0.5)
+    stripe.receiveShadow = true
+    marker.add(stripe)
+  }
+  return marker
+}
+
+function ThreeTrackDiagram({ race, raceData, frameIndex, horseScale, straightView, keepLanes, selectedPost, showAllTrajectories, horsePredictions, showPredictedProbability, isPlaying, onSelectHorse }) {
+  const hostRef = useRef(null)
+  const sceneStateRef = useRef(null)
+  const onSelectHorseRef = useRef(onSelectHorse)
+  const isPlayingRef = useRef(isPlaying)
+  onSelectHorseRef.current = onSelectHorse
+  isPlayingRef.current = isPlaying
+  const currentFrame = raceData?.frames[frameIndex]
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return undefined
+
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x111820)
+    scene.fog = new THREE.Fog(0x111820, 700, 1500)
+    const camera = new THREE.PerspectiveCamera(46, 1, 1, 2400)
+    camera.position.set(0, 430, 570)
+    camera.rotation.order = 'YXZ'
+    let yaw = 0
+    let pitch = -0.62
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    renderer.domElement.className = 'three-canvas'
+    renderer.domElement.tabIndex = 0
+    host.appendChild(renderer.domElement)
+
+    scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x26301d, 1.6))
+    const sun = new THREE.DirectionalLight(0xffffff, 2.2)
+    sun.position.set(-260, 480, 180)
+    sun.castShadow = true
+    sun.shadow.mapSize.set(2048, 2048)
+    sun.shadow.camera.left = -600
+    sun.shadow.camera.right = 600
+    sun.shadow.camera.top = 500
+    sun.shadow.camera.bottom = -500
+    scene.add(sun)
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(1500, 1200),
+      new THREE.MeshStandardMaterial({ color: 0x355c32, roughness: 1 }),
+    )
+    ground.rotation.x = -Math.PI / 2
+    ground.position.y = -2
+    ground.receiveShadow = true
+    scene.add(ground)
+
+    const layout = trackLayouts[race.trackId]
+    if (straightView) {
+      const geometry = getCourseGeometry(race)
+      const course = new THREE.Mesh(
+        new THREE.BoxGeometry(geometry.halfTrackWidth * 2, 7, straightTrack.startY - straightTrack.finishY),
+        new THREE.MeshStandardMaterial({ color: race.course === 'inner' ? 0x467d3e : 0x9b704b, roughness: 0.95 }),
+      )
+      course.position.set(0, 2, (straightTrack.startY + straightTrack.finishY) / 2 - canvasSize.height / 2)
+      course.castShadow = true
+      course.receiveShadow = true
+      scene.add(course)
+    } else {
+      scene.add(createExtrudedCourse(layout.main, 0x9b704b))
+      scene.add(createRail(layout.main, layout.main.radius + layout.main.halfTrackWidth))
+      scene.add(createRail(layout.main, layout.main.radius - layout.main.halfTrackWidth))
+      if (layout.inner) {
+        scene.add(createExtrudedCourse(layout.inner, 0x477b3d))
+        scene.add(createRail(layout.inner, layout.inner.radius + layout.inner.halfTrackWidth))
+        scene.add(createRail(layout.inner, layout.inner.radius - layout.inner.halfTrackWidth))
+      }
+      layout.chutes.forEach((chute) => {
+        scene.add(createRoundedChute(layout.main, chute))
+      })
+    }
+
+    if (raceData) {
+      const activeGeometry = getCourseGeometry(race)
+      const startPoint = straightView
+        ? { point: [straightTrack.centerX, straightTrack.startY], tangent: [0, -1] }
+        : getRaceCenterlinePoint(race, raceData, 0)
+      const finishPoint = straightView
+        ? { point: [straightTrack.centerX, straightTrack.finishY], tangent: [0, -1] }
+        : getRaceCenterlinePoint(race, raceData, raceData.raceDistance)
+      scene.add(createCourseMarker(startPoint, activeGeometry.halfTrackWidth))
+      scene.add(createCourseMarker(finishPoint, activeGeometry.halfTrackWidth, true))
+    }
+
+    const horseGroup = new THREE.Group()
+    const pathGroup = new THREE.Group()
+    scene.add(pathGroup)
+    scene.add(horseGroup)
+    const pressed = new Set()
+    let dragging = false
+    let dragDistance = 0
+    let lastX = 0
+    let lastY = 0
+
+    const onPointerDown = (event) => {
+      dragging = true
+      dragDistance = 0
+      lastX = event.clientX
+      lastY = event.clientY
+      renderer.domElement.setPointerCapture(event.pointerId)
+    }
+    const onPointerMove = (event) => {
+      if (!dragging) return
+      dragDistance += Math.hypot(event.clientX - lastX, event.clientY - lastY)
+      yaw -= (event.clientX - lastX) * 0.006
+      pitch = Math.max(-1.35, Math.min(-0.12, pitch - (event.clientY - lastY) * 0.005))
+      lastX = event.clientX
+      lastY = event.clientY
+    }
+    const onPointerUp = (event) => {
+      if (dragging && dragDistance < 5) {
+        const rect = renderer.domElement.getBoundingClientRect()
+        const pointer = new THREE.Vector2(
+          ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        )
+        const raycaster = new THREE.Raycaster()
+        raycaster.setFromCamera(pointer, camera)
+        let clickedHorse = raycaster.intersectObjects(horseGroup.children, true)[0]?.object
+        while (clickedHorse?.parent && clickedHorse.parent !== horseGroup) {
+          clickedHorse = clickedHorse.parent
+        }
+        onSelectHorseRef.current(clickedHorse?.userData.postPosition ?? null)
+      }
+      dragging = false
+    }
+    const onKeyDown = (event) => {
+      const key = event.key.toLowerCase()
+      if (['w', 'a', 's', 'd'].includes(key) && !event.target.matches('input, select, textarea')) {
+        event.preventDefault()
+        pressed.add(key)
+      }
+    }
+    const onKeyUp = (event) => { pressed.delete(event.key.toLowerCase()) }
+    renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('pointermove', onPointerMove)
+    renderer.domElement.addEventListener('pointerup', onPointerUp)
+    renderer.domElement.addEventListener('pointercancel', onPointerUp)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+
+    const resizeObserver = new ResizeObserver(() => {
+      const width = host.clientWidth
+      const height = Math.max(320, width * 0.7)
+      renderer.setSize(width, height, false)
+      camera.aspect = width / height
+      camera.updateProjectionMatrix()
+    })
+    resizeObserver.observe(host)
+
+    const clock = new THREE.Clock()
+    const cameraDirection = new THREE.Vector3()
+    const cameraRight = new THREE.Vector3()
+    const worldUp = new THREE.Vector3(0, 1, 0)
+    let animationFrameId
+    const render = () => {
+      const elapsed = Math.min(clock.getDelta(), 0.05)
+      camera.rotation.y = yaw
+      camera.rotation.x = pitch
+      const forward = Number(pressed.has('w')) - Number(pressed.has('s'))
+      const sideways = Number(pressed.has('d')) - Number(pressed.has('a'))
+      if (forward || sideways) {
+        const speed = 230 * elapsed
+        camera.getWorldDirection(cameraDirection)
+        cameraDirection.normalize()
+        cameraRight.crossVectors(cameraDirection, worldUp).normalize()
+        camera.position.addScaledVector(cameraDirection, forward * speed)
+        camera.position.addScaledVector(cameraRight, sideways * speed)
+      }
+      horseGroup.children.forEach((horse) => {
+        const strideSpeed = 7 + (horse.userData.runningSpeed ?? 50) * 0.12
+        horse.children.forEach((part) => {
+          if (!part.userData.horseLeg) return
+          const swing = isPlayingRef.current
+            ? Math.sin(clock.elapsedTime * strideSpeed + part.userData.phase) * 0.62
+            : 0
+          part.rotation.z = part.userData.baseAngle + swing
+        })
+      })
+      renderer.render(scene, camera)
+      animationFrameId = requestAnimationFrame(render)
+    }
+    sceneStateRef.current = { horseGroup, pathGroup }
+    render()
+
+    return () => {
+      cancelAnimationFrame(animationFrameId)
+      resizeObserver.disconnect()
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      renderer.dispose()
+      scene.traverse((object) => {
+        object.geometry?.dispose()
+        const materials = Array.isArray(object.material) ? object.material : object.material ? [object.material] : []
+        materials.forEach((material) => {
+          material.map?.dispose()
+          material.dispose()
+        })
+      })
+      host.removeChild(renderer.domElement)
+      sceneStateRef.current = null
+    }
+  }, [race, raceData, straightView])
+
+  useEffect(() => {
+    const horseGroup = sceneStateRef.current?.horseGroup
+    if (!horseGroup || !raceData || !currentFrame) return
+    const horsesByPost = new Map(horseGroup.children.map((horse) => [horse.userData.postPosition, horse]))
+    const laneCount = Math.max(...currentFrame.horses.map(([postPosition]) => postPosition))
+    const size = getHorseSize(race, raceData, horseScale)
+    currentFrame.horses.forEach((horseData) => {
+      const [postPosition] = horseData
+      const point = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
+      const isSelected = postPosition === selectedPost
+      const displayLabel = getHorseDisplayLabel(postPosition, horsePredictions, showPredictedProbability)
+      let horse = horsesByPost.get(postPosition)
+      if (!horse) {
+        horse = createHorseModel(
+          horsePalette[(postPosition - 1) % horsePalette.length],
+          displayLabel,
+          isSelected,
+        )
+        horse.userData.postPosition = postPosition
+        horseGroup.add(horse)
+      } else if (horse.userData.displayLabel !== displayLabel || horse.userData.selected !== isSelected) {
+        const replacement = createHorseModel(
+          horsePalette[(postPosition - 1) % horsePalette.length],
+          displayLabel,
+          isSelected,
+        )
+        replacement.userData.postPosition = postPosition
+        replacement.position.copy(horse.position)
+        replacement.rotation.copy(horse.rotation)
+        replacement.scale.copy(horse.scale)
+        horseGroup.add(replacement)
+        horseGroup.remove(horse)
+        disposeThreeObject(horse)
+        horse = replacement
+      }
+      horse.userData.displayLabel = displayLabel
+      horse.userData.selected = isSelected
+      horse.userData.runningSpeed = horseData[3]
+      horse.scale.set(Math.max(size.length, 5), Math.max(5.8, horseScale * 5.8), Math.max(size.width, 4.5))
+      horse.position.set(point.x - canvasSize.width / 2, 7, point.y - canvasSize.height / 2)
+      horse.rotation.y = -point.angle
+    })
+  }, [currentFrame, horsePredictions, horseScale, keepLanes, race, raceData, selectedPost, showPredictedProbability, straightView])
+
+  useEffect(() => {
+    const pathGroup = sceneStateRef.current?.pathGroup
+    if (!pathGroup) return
+    pathGroup.children.forEach((path) => {
+      path.geometry.dispose()
+      path.material.dispose()
+    })
+    pathGroup.clear()
+    if (!raceData || (selectedPost === null && !showAllTrajectories)) return
+
+    const { min, range } = getRaceSpeedRange(raceData)
+    const posts = showAllTrajectories
+      ? raceData.frames[0].horses.map(([postPosition]) => postPosition)
+      : [selectedPost]
+    posts.forEach((postPosition) => {
+      const trajectory = sampleTrajectory(
+        getHorseTrajectory(race, raceData, postPosition, straightView, keepLanes),
+      )
+      if (trajectory.length < 2) return
+      const positions = []
+      const colors = []
+      const isSelected = postPosition === selectedPost
+      trajectory.slice(1).forEach((point, index) => {
+        const previous = trajectory[index]
+        const height = isSelected ? 8 : 7.5
+        positions.push(
+          previous.x - canvasSize.width / 2, height, previous.y - canvasSize.height / 2,
+          point.x - canvasSize.width / 2, height, point.y - canvasSize.height / 2,
+        )
+        for (const speed of [previous.speed, point.speed]) {
+          const amount = Math.max(0, Math.min((speed - min) / range, 1))
+          const color = new THREE.Color().setHSL(amount / 3, 0.82, 0.46)
+          colors.push(color.r, color.g, color.b)
+        }
+      })
+      const geometry = new LineSegmentsGeometry()
+      geometry.setPositions(positions)
+      geometry.setColors(colors)
+      const line = new LineSegments2(geometry, new LineMaterial({
+        vertexColors: true,
+        linewidth: isSelected ? 4 : 2.5,
+        transparent: !isSelected && showAllTrajectories,
+        opacity: isSelected || !showAllTrajectories ? 1 : 0.42,
+      }))
+      line.renderOrder = isSelected ? 2 : 1
+      pathGroup.add(line)
+    })
+  }, [keepLanes, race, raceData, selectedPost, showAllTrajectories, straightView])
+
+  return <div ref={hostRef} className="three-track" aria-label={`${trackLayouts[race.trackId].name} 3D map`} />
+}
+
 function TrackDiagram({
   race,
   raceData,
@@ -632,12 +1357,17 @@ function TrackDiagram({
   selectedPost,
   straightView,
   keepLanes,
+  collisionAvoidance,
+  showAllTrajectories,
+  horsePredictions,
+  showPredictedProbability,
   manualPanEnabled,
   onPan,
   onSelectHorse,
 }) {
   const canvasRef = useRef(null)
   const dragRef = useRef(null)
+  const collisionStateRef = useRef({ context: '', offsets: new Map(), horses: [] })
   const currentFrame = raceData?.frames[frameIndex]
 
   useEffect(() => {
@@ -749,11 +1479,54 @@ function TrackDiagram({
       284,
     )
 
+    if (raceData && (selectedPost !== null || showAllTrajectories)) {
+      const posts = showAllTrajectories
+        ? raceData.frames[0].horses.map(([postPosition]) => postPosition)
+        : [selectedPost]
+      const orderedPosts = [...posts].sort(
+        (a, b) => Number(a === selectedPost) - Number(b === selectedPost),
+      )
+      const { min, range } = getRaceSpeedRange(raceData)
+      orderedPosts.forEach((postPosition) => {
+        const trajectory = sampleTrajectory(
+          getHorseTrajectory(race, raceData, postPosition, straightView, keepLanes),
+        )
+        if (trajectory.length < 2) return
+        const isSelected = postPosition === selectedPost
+        ctx.save()
+        ctx.globalAlpha = isSelected || !showAllTrajectories ? 1 : 0.42
+        ctx.lineCap = 'round'
+        ctx.lineWidth = (isSelected ? 5 : 3) / viewportScale
+        trajectory.slice(1).forEach((point, index) => {
+          const previous = trajectory[index]
+          ctx.strokeStyle = getSpeedColor((previous.speed + point.speed) / 2, min, range)
+          ctx.beginPath()
+          ctx.moveTo(previous.x, previous.y)
+          ctx.lineTo(point.x, point.y)
+          ctx.stroke()
+        })
+        ctx.restore()
+      })
+    }
+
     if (raceData && currentFrame) {
       const horseSize = getHorseSize(race, raceData, horseScale)
-      currentFrame.horses.forEach((horseData) => {
+      const collisionContext = `${race.label}:${straightView}:${keepLanes}:${horseScale}`
+      const rawHorses = currentFrame.horses.map((horseData) => {
         const [postPosition] = horseData
         const horse = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
+        return { ...horse, postPosition }
+      })
+      const previousOffsets = collisionAvoidance && collisionStateRef.current.context === collisionContext
+          ? collisionStateRef.current.offsets
+          : new Map()
+      const resolved = collisionAvoidance
+        ? resolveHorseCollisions(rawHorses, horseSize, previousOffsets)
+        : { offsets: new Map(), horses: rawHorses }
+      collisionStateRef.current = { context: collisionContext, ...resolved }
+
+      resolved.horses.forEach((horse) => {
+        const { postPosition } = horse
         drawHorse(
           ctx,
           horse.x,
@@ -762,7 +1535,7 @@ function TrackDiagram({
           horseSize,
           horsePalette[(postPosition - 1) % horsePalette.length],
           styles.getPropertyValue('--text-h').trim(),
-          postPosition,
+          getHorseDisplayLabel(postPosition, horsePredictions, showPredictedProbability),
           viewport.rotation,
           viewportScale,
           postPosition === selectedPost,
@@ -770,7 +1543,7 @@ function TrackDiagram({
       })
     }
     ctx.restore()
-  }, [currentFrame, horseScale, keepLanes, race, raceData, selectedPost, straightView, viewport])
+  }, [collisionAvoidance, currentFrame, horsePredictions, horseScale, keepLanes, race, raceData, selectedPost, showAllTrajectories, showPredictedProbability, straightView, viewport])
 
   return (
     <canvas
@@ -835,14 +1608,11 @@ function TrackDiagram({
           const sin = Math.sin(-viewport.rotation)
           const clickX = scaledX * cos - scaledY * sin + canvasSize.width / 2 - viewport.x
           const clickY = scaledX * sin + scaledY * cos + canvasSize.height / 2 - viewport.y
-          const laneCount = Math.max(...currentFrame.horses.map(([postPosition]) => postPosition))
-          const clickedHorse = [...currentFrame.horses].reverse().find((horseData) => {
-            const [postPosition] = horseData
-            const horse = getHorsePoint(race, raceData, horseData, straightView, keepLanes, laneCount)
-            return isPointInHorse(clickX, clickY, { ...horse, postPosition }, horseSize)
-          })
+          const clickedHorse = [...collisionStateRef.current.horses].reverse().find((horse) =>
+            isPointInHorse(clickX, clickY, horse, horseSize),
+          )
 
-          onSelectHorse(clickedHorse?.[0] ?? null)
+          onSelectHorse(clickedHorse?.postPosition ?? null)
         }
 
         dragRef.current = null
@@ -866,19 +1636,40 @@ function App() {
   const [viewport, setViewport] = useState(defaultViewport)
   const [horseScale, setHorseScale] = useState(1)
   const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [showAllTrajectories, setShowAllTrajectories] = useState(false)
+  const [showPredictedProbability, setShowPredictedProbability] = useState(false)
   const [panCamera, setPanCamera] = useState(false)
   const [lockOrientation, setLockOrientation] = useState(false)
   const [straightView, setStraightView] = useState(false)
   const [keepLanes, setKeepLanes] = useState(false)
-  const [leaderboardSort, setLeaderboardSort] = useState('distance')
+  const [collisionAvoidance, setCollisionAvoidance] = useState(true)
+  const [render3D, setRender3D] = useState(false)
   const [selectedPost, setSelectedPost] = useState(null)
   const race = useMemo(() => races[selectedRace], [selectedRace])
+  const currentHorsePredictions = useMemo(() => {
+    const metadataRace = horseMetadata.races.find((candidate) =>
+      candidate.track_id === race.trackId &&
+      candidate.race_date === race.raceDate &&
+      candidate.race_number === race.raceNumber,
+    )
+    return Object.fromEntries(
+      (metadataRace?.horses ?? []).map((horse) => [horse.post_position, horse]),
+    )
+  }, [race])
   const raceData = raceDataById[selectedRace]
   const maxFrameIndex = Math.max(0, (raceData?.frames.length ?? 1) - 1)
   const effectiveFrameIndex = Math.min(frameIndex, maxFrameIndex)
   const currentFrame = raceData?.frames[effectiveFrameIndex]
   const currentRaceEntries = entriesByRace[getRaceEntryKey(race)] ?? emptyRaceEntries
   const currentHorseEntries = currentRaceEntries.horses ?? emptyRaceEntries
+  const raceEvents = useMemo(
+    () => getRaceEvents(race, raceData, currentHorseEntries),
+    [currentHorseEntries, race, raceData],
+  )
+  const currentRaceEvent = useMemo(() => {
+    const currentTime = currentFrame?.time ?? 0
+    return [...raceEvents].reverse().find((event) => event.time <= currentTime) ?? raceEvents[0]
+  }, [currentFrame?.time, raceEvents])
   const isRaceFinished = Boolean(raceData && effectiveFrameIndex >= maxFrameIndex)
   const leaderboardRows = useMemo(() => {
     if (!currentFrame) return []
@@ -898,8 +1689,8 @@ function App() {
         horseName: currentHorseEntries[postPosition]?.horseName ?? `Post ${postPosition}`,
         speedGlow: Math.max(0, Math.min((speed - minSpeed) / speedRange, 1)),
       }))
-      .sort((a, b) => b[leaderboardSort] - a[leaderboardSort])
-  }, [currentFrame, currentHorseEntries, leaderboardSort])
+      .sort((a, b) => b.distance - a.distance)
+  }, [currentFrame, currentHorseEntries])
   const selectedHorseDetails = useMemo(() => {
     if (selectedPost === null) return null
 
@@ -985,9 +1776,6 @@ function App() {
 
   function selectHorse(postPosition) {
     setSelectedPost((current) => (current === postPosition ? null : postPosition))
-    if (postPosition !== null) {
-      setShowLeaderboard(true)
-    }
   }
 
   function pan(dx, dy) {
@@ -1196,6 +1984,25 @@ function App() {
             <label className="leaderboard-toggle">
               <input
                 type="checkbox"
+                checked={showAllTrajectories}
+                disabled={!raceData}
+                onChange={(event) => setShowAllTrajectories(event.target.checked)}
+              />
+              <span>Show All Trajectories</span>
+            </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
+                checked={showPredictedProbability}
+                onChange={(event) => setShowPredictedProbability(event.target.checked)}
+              />
+              <span>Show Predicted Probability</span>
+            </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
                 checked={panCamera}
                 disabled={!raceData}
                 onChange={(event) => {
@@ -1239,70 +2046,28 @@ function App() {
               />
               <span>Stay in Lanes</span>
             </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
+                checked={collisionAvoidance}
+                disabled={!raceData}
+                onChange={(event) => setCollisionAvoidance(event.target.checked)}
+              />
+              <span>Avoid Collisions</span>
+            </label>
+
+            <label className="leaderboard-toggle">
+              <input
+                type="checkbox"
+                checked={render3D}
+                onChange={(event) => setRender3D(event.target.checked)}
+              />
+              <span>3D Map</span>
+            </label>
           </div>
 
-          {showLeaderboard && (
-            <label className="leaderboard-sort">
-              <span>Sort by</span>
-              <select value={leaderboardSort} onChange={(event) => setLeaderboardSort(event.target.value)}>
-                <option value="distance">Distance</option>
-                <option value="speed">Speed</option>
-              </select>
-            </label>
-          )}
         </div>
-
-        {selectedHorseDetails && (
-          <aside className="horse-detail-popover" aria-label={`${selectedHorseDetails.horseName} details`}>
-            <div className="horse-detail-header">
-              <div>
-                <span className="horse-detail-post">Post {selectedHorseDetails.postPosition}</span>
-                <h3>{selectedHorseDetails.horseName}</h3>
-              </div>
-              <button type="button" onClick={() => setSelectedPost(null)} aria-label="Close horse details">
-                X
-              </button>
-            </div>
-            <dl>
-              <div>
-                <dt>Trainer</dt>
-                <dd>{selectedHorseDetails.trainerName}</dd>
-              </div>
-              <div>
-                <dt>Jockey</dt>
-                <dd>{selectedHorseDetails.jockeyName}</dd>
-              </div>
-              <div>
-                <dt>Win Probability</dt>
-                <dd>{formatProbability(selectedHorseDetails.winProbability)}</dd>
-              </div>
-              <div>
-                <dt>Carried Weight</dt>
-                <dd>{formatCarriedWeight(selectedHorseDetails.weightCarried)}</dd>
-              </div>
-              <div>
-                <dt>Sex</dt>
-                <dd>{selectedHorseDetails.sex}</dd>
-              </div>
-              <div>
-                <dt>Foaling Date</dt>
-                <dd>{selectedHorseDetails.foalingDate}</dd>
-              </div>
-              <div>
-                <dt>Lengths Back</dt>
-                <dd>
-                  {selectedHorseDetails.lengthsBehind === undefined
-                    ? 'Unknown'
-                    : selectedHorseDetails.lengthsBehind.toFixed(1)}
-                </dd>
-              </div>
-              <div>
-                <dt>Current Speed</dt>
-                <dd>{selectedHorseDetails.speed === undefined ? 'Unknown' : `${selectedHorseDetails.speed.toFixed(1)} ft/s`}</dd>
-              </div>
-            </dl>
-          </aside>
-        )}
 
         <div className={showLeaderboard ? 'track-layout with-leaderboard' : 'track-layout'}>
           {showLeaderboard && (
@@ -1351,19 +2116,78 @@ function App() {
             </div>
           )}
 
-          <TrackDiagram
-            race={race}
-            raceData={raceData}
-            frameIndex={effectiveFrameIndex}
-            viewport={viewport}
-            horseScale={horseScale}
-            selectedPost={selectedPost}
-            straightView={straightView}
-            keepLanes={keepLanes}
-            manualPanEnabled={!panCamera}
-            onPan={pan}
-            onSelectHorse={selectHorse}
-          />
+          <div className="map-column">
+            {render3D ? (
+              <ThreeTrackDiagram
+                race={race}
+                raceData={raceData}
+                frameIndex={effectiveFrameIndex}
+                horseScale={horseScale}
+                straightView={straightView}
+                keepLanes={keepLanes}
+                selectedPost={selectedPost}
+                showAllTrajectories={showAllTrajectories}
+                horsePredictions={currentHorsePredictions}
+                showPredictedProbability={showPredictedProbability}
+                isPlaying={isPlaying}
+                onSelectHorse={selectHorse}
+              />
+            ) : (
+              <TrackDiagram
+                race={race}
+                raceData={raceData}
+                frameIndex={effectiveFrameIndex}
+                viewport={viewport}
+                horseScale={horseScale}
+                selectedPost={selectedPost}
+                straightView={straightView}
+                keepLanes={keepLanes}
+                collisionAvoidance={collisionAvoidance}
+                showAllTrajectories={showAllTrajectories}
+                horsePredictions={currentHorsePredictions}
+                showPredictedProbability={showPredictedProbability}
+                manualPanEnabled={!panCamera}
+                onPan={pan}
+                onSelectHorse={selectHorse}
+              />
+            )}
+            {render3D && <p className="camera-help">Drag the map to orbit · WASD to move</p>}
+            <aside className="race-commentary" aria-live="polite" aria-label="Race commentary">
+              <time dateTime={`PT${currentRaceEvent.time.toFixed(2)}S`}>
+                {formatEventTime(currentRaceEvent.time)}
+              </time>
+              <p>{currentRaceEvent.text}</p>
+            </aside>
+            {selectedHorseDetails && (
+              <aside className="horse-detail-popover" aria-label={`${selectedHorseDetails.horseName} details`}>
+                <div className="horse-detail-header">
+                  <div>
+                    <span className="horse-detail-post">Post {selectedHorseDetails.postPosition}</span>
+                    <h3>{selectedHorseDetails.horseName}</h3>
+                  </div>
+                  <button type="button" onClick={() => setSelectedPost(null)} aria-label="Close horse details">
+                    X
+                  </button>
+                </div>
+                <dl>
+                  <div><dt>Trainer</dt><dd>{selectedHorseDetails.trainerName}</dd></div>
+                  <div><dt>Jockey</dt><dd>{selectedHorseDetails.jockeyName}</dd></div>
+                  <div><dt>Win Probability</dt><dd>{formatProbability(selectedHorseDetails.winProbability)}</dd></div>
+                  <div><dt>Carried Weight</dt><dd>{formatCarriedWeight(selectedHorseDetails.weightCarried)}</dd></div>
+                  <div><dt>Sex</dt><dd>{selectedHorseDetails.sex}</dd></div>
+                  <div><dt>Foaling Date</dt><dd>{selectedHorseDetails.foalingDate}</dd></div>
+                  <div>
+                    <dt>Lengths Back</dt>
+                    <dd>{selectedHorseDetails.lengthsBehind === undefined ? 'Unknown' : selectedHorseDetails.lengthsBehind.toFixed(1)}</dd>
+                  </div>
+                  <div>
+                    <dt>Current Speed</dt>
+                    <dd>{selectedHorseDetails.speed === undefined ? 'Unknown' : `${selectedHorseDetails.speed.toFixed(1)} ft/s`}</dd>
+                  </div>
+                </dl>
+              </aside>
+            )}
+          </div>
         </div>
       </section>
     </main>

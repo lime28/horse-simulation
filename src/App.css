@@ -293,8 +293,7 @@
   flex-wrap: wrap;
 }
 
-.leaderboard-toggle,
-.leaderboard-sort {
+.leaderboard-toggle {
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -312,16 +311,6 @@
 
 .leaderboard-toggle input:disabled {
   opacity: 0.45;
-}
-
-.leaderboard-sort select {
-  min-height: 36px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 0 32px 0 10px;
-  color: var(--text-h);
-  background: var(--surface);
-  font-weight: 700;
 }
 
 .horse-detail-popover {
@@ -409,6 +398,12 @@
   align-items: start;
 }
 
+.map-column {
+  min-width: 0;
+  display: grid;
+  gap: 18px;
+}
+
 .leaderboard {
   overflow-x: auto;
   border: 1px solid var(--border);
@@ -494,6 +489,79 @@
   cursor: grabbing;
 }
 
+.three-track {
+  width: 100%;
+  aspect-ratio: 10 / 7;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #111820;
+}
+
+.three-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+.three-canvas:active {
+  cursor: grabbing;
+}
+
+.three-canvas:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+}
+
+.track-diagram:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.camera-help {
+  margin: -10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+.race-commentary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 62px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--focus);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--surface);
+}
+
+.race-commentary time {
+  min-width: 54px;
+  border-radius: 5px;
+  padding: 7px 9px;
+  color: var(--surface);
+  background: var(--text-h);
+  font: 800 13px/1 var(--sans);
+  text-align: center;
+}
+
+.race-commentary p {
+  margin: 0;
+  color: var(--text-h);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     padding: 22px 16px;
@@ -538,10 +606,6 @@
   .leaderboard-toggles {
     display: grid;
     gap: 12px;
-  }
-
-  .leaderboard-sort {
-    justify-content: space-between;
   }
 
   .horse-detail-popover dl {
